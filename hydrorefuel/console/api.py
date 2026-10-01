@@ -158,11 +158,15 @@ class Api:
         )
 
     def _fill(self, params: dict, body: dict) -> dict:
+        disturb_raw = body.get("disturb_after_s")
         return self._platform.fill(
             vehicle=str(body.get("vehicle", "vehicle01")),
             rate_kg_per_min=_as_float(body, "rate_kg_per_min", 3.0),
             steps=int(body.get("steps", 3)),
             dt=_as_float(body, "dt", 36.0),
+            rewarm_ticks=int(body.get("rewarm_ticks", 0)),
+            drop_ticks=int(body.get("drop_ticks", 0)),
+            disturb_after_s=None if disturb_raw is None else _as_float(body, "disturb_after_s", 0.0),
         )
 
     def _stop(self, params: dict, body: dict) -> dict:

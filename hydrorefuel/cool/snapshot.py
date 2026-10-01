@@ -1,25 +1,25 @@
-"""预冷状态快照。"""
+"""预冷状态快照。
+
+快照字段全部取自 :class:`~hydrorefuel.cool.verdict.PrecoolVerdict`，与审计
+落盘同源，不做第二次判断。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .verdict import PrecoolVerdict
+
 
 @dataclass(frozen=True)
 class CoolSnapshot:
-    """预冷某一时刻的状态。"""
+    """预冷某一时刻的合格判定快照。"""
 
-    state: str
-    temperature_c: float
-    target_c: float
-    held_s: float
-    ready: bool
+    verdict: PrecoolVerdict
+
+    @classmethod
+    def from_verdict(cls, verdict: PrecoolVerdict) -> "CoolSnapshot":
+        return cls(verdict=verdict)
 
     def as_dict(self) -> dict:
-        return {
-            "state": self.state,
-            "temperature_c": round(self.temperature_c, 2),
-            "target_c": round(self.target_c, 2),
-            "held_s": round(self.held_s, 2),
-            "ready": self.ready,
-        }
+        return self.verdict.as_dict()

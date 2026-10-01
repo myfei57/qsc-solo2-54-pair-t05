@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ..cool.precool import Precooler
 from ..cool.temperature import TemperatureModel
+from ..cool.verdict import EVENT_STARTED
 from ..disp.machine import Dispenser
 from ..disp.nozzle import Nozzle
 from ..errors import HydroError
@@ -32,8 +33,17 @@ def fill_vehicle(
     now: float = 0.0,
     dt: float = 36.0,
     max_steps: int = 6000,
+    rewarm_ticks: int = 0,
+    drop_ticks: int = 0,
+    disturb_after_s: float | None = None,
 ) -> dict:
-    """执行一次加注，返回带步骤与违约项的报告。"""
+    """执行一次加注，返回带步骤与违约项的报告。
+
+    ``rewarm_ticks`` / ``drop_ticks`` 在枪口温度首次进入目标带并稳温
+    ``disturb_after_s`` 秒（默认取稳定窗口时长，即刚判合格之后）之后，分别
+    注入若干拍回温、回读丢点，用于现场/验证环境核对回温作废（或延长窗口）
+    与部分失败判定。
+    """
 
     log: list[dict] = []
     violations: list[str] = []
@@ -62,26 +72,42 @@ def fill_vehicle(
             return {"station": station, "vehicle": vehicle, "ok": False, "steps": log, "violations": violations}
 
         temperature.reset()
-        precooler.start()
-        ready = False
+        trigger_s = precooler.window_s if disturb_after_s is None else disturb_after_s
+        # 回温与丢点交替安排：锚点在每次扰动后重置，每个扰动都在"重新稳住
+        # trigger_s 秒后"投出，保证多扰动各占一拍、顺序可控。
+        for index in range(max(rewarm_ticks, drop_ticks)):
+            if index < rewarm_ticks:
+                temperature.arm_rewarm(1, after_s=trigger_s)
+            if index < drop_ticks:
+                temperature.arm_drop_readback(1, after_s=trigger_s)
+        verdict = precooler.start(now)
+        elapsed = 0.0
         for _ in range(max_steps):
-            temperature.cool(dt)
-            ready = precooler.tick(dt, temperature.value_c)
-            if ready:
+            elapsed += dt
+            reading = temperature.read(dt)
+            verdict = precooler.tick(dt, reading, ts=now + elapsed)
+            # 回温作废/延长、合格撤销、回读丢点都在发生的那一拍单独留痕，
+            # detail 即当拍判定，与最终放行依据同源。
+            if verdict.event is not None and verdict.event != EVENT_STARTED:
+                log.append({"component": "cool", "action": verdict.event, "detail": verdict.as_dict()})
+            # 失败即停；否则要"合格且已安排的回温/丢点扰动都投出"才算完，
+            # 这样合格之后那拍的回温、丢点才真正会发生并被重新判定。
+            if precooler.is_failed() or (verdict.ready and temperature.disturbances_pending() == 0):
                 break
-        log.append(
-            {
-                "component": "cool",
-                "action": "precool",
-                "detail": {
-                    "temperature_c": round(temperature.value_c, 2),
-                    "held_s": round(precooler.held_s, 2),
-                    "ready": ready,
-                },
-            }
-        )
-        if not ready:
+        # 预冷汇总这一步的 detail 就是最终判定对象本身：控制台与审计看到的
+        # 字段与"是否放行"的依据完全一致，谁都不另算一遍。
+        log.append({"component": "cool", "action": "precool", "detail": verdict.as_dict()})
+        if precooler.is_failed():
+            violations.append(f"precool_{verdict.failure_reason or 'failed'}")
+            nozzle.unseat()
+            return {"station": station, "vehicle": vehicle, "ok": False, "steps": log, "violations": violations}
+        if not verdict.ready:
             violations.append("precool_not_ready")
+            nozzle.unseat()
+            return {"station": station, "vehicle": vehicle, "ok": False, "steps": log, "violations": violations}
+        if not verdict.sample_ok or not verdict.in_band:
+            # 防线：判定对象说还没稳住/回读不全时，绝不允许开阀。
+            violations.append("precool_verdict_not_ready")
             nozzle.unseat()
             return {"station": station, "vehicle": vehicle, "ok": False, "steps": log, "violations": violations}
 

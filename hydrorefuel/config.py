@@ -17,6 +17,12 @@ from .errors import ConfigError
 
 _MISSING = object()
 
+# 回温超带后的处置策略：整段作废重来 / 延长稳定窗口再看。按枪型选配。
+REWARM_POLICIES = ("restart", "extend")
+# 稳定窗口模式定死为固定时长：进入目标带后必须连续稳满固定秒数，不接受
+# "按波动带收敛"之类的另一套口径，避免判定与审计各执一词。
+STABILITY_WINDOW_MODES = ("fixed_duration",)
+
 
 def _section(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = mapping.get(key)
@@ -48,6 +54,22 @@ def _integer(section: Mapping[str, Any], key: str, *, minimum: int = 0) -> int:
     if value < minimum:
         raise ConfigError(f"配置字段 {key!r} 不得小于 {minimum}", component="config")
     return value
+
+
+def _number_with_default(
+    section: Mapping[str, Any], key: str, default: float, *, minimum: float | None = None
+) -> float:
+    if section.get(key) is None:
+        return float(default)
+    return _number(section, key, minimum=minimum)
+
+
+def _integer_with_default(
+    section: Mapping[str, Any], key: str, default: int, *, minimum: int = 0
+) -> int:
+    if section.get(key) is None:
+        return int(default)
+    return _integer(section, key, minimum=minimum)
 
 
 @dataclass(frozen=True)
@@ -158,20 +180,32 @@ class BufferLimits:
 
 @dataclass(frozen=True)
 class CoolLimits:
-    """预冷目标温度与保持时长约束。"""
+    """预冷目标温度与稳定窗口约束。
+
+    稳定窗口模式固定为 ``fixed_duration``：温度进入目标带后必须连续稳满
+    ``precool_hold_s`` 秒才合格；回温超带或回读丢点都会打断连续窗口。
+    """
 
     target_temp_c: float
     temp_band_c: float
     cool_rate_c_per_s: float
     precool_hold_s: float
+    stability_window_mode: str = STABILITY_WINDOW_MODES[0]
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "CoolLimits":
+        mode = section.get("stability_window_mode", STABILITY_WINDOW_MODES[0])
+        if not isinstance(mode, str) or mode not in STABILITY_WINDOW_MODES:
+            raise ConfigError(
+                f"stability_window_mode 只能是 {STABILITY_WINDOW_MODES[0]!r}",
+                component="config",
+            )
         limits = cls(
             target_temp_c=_number(section, "target_temp_c"),
             temp_band_c=_number(section, "temp_band_c", minimum=0.5),
             cool_rate_c_per_s=_number(section, "cool_rate_c_per_s", minimum=0.05),
             precool_hold_s=_number(section, "precool_hold_s", minimum=1.0),
+            stability_window_mode=mode,
         )
         if limits.target_temp_c >= 0.0:
             raise ConfigError("预冷目标温度必须低于 0 度", component="config")
@@ -181,6 +215,85 @@ class CoolLimits:
         """温度是否已落到加注允许带。"""
 
         return abs(temperature_c - self.target_temp_c) <= self.temp_band_c
+
+
+@dataclass(frozen=True)
+class GunProfile:
+    """一种枪型的回温处置策略。
+
+    ``rewarm_policy`` 决定稳定窗口内温度回温超带后的处置：
+
+    * ``restart``：整段作废，已稳住的时长清零，重新进带重新稳满才算；
+    * ``extend``：保留已稳住的时长，把稳定窗口再延长
+      ``rewarm_extend_s`` 秒继续看；一共可延长 ``rewarm_extend_max`` 次，
+      次数用尽仍未合格则本枪型预冷失败，必须重来。
+    """
+
+    gun_type: str
+    rewarm_policy: str
+    rewarm_extend_s: float
+    rewarm_extend_max: int
+
+    @classmethod
+    def from_mapping(cls, gun_type: str, section: Mapping[str, Any]) -> "GunProfile":
+        if not isinstance(gun_type, str) or not gun_type.strip():
+            raise ConfigError("枪型名必须是非空字符串", component="config")
+        policy = section.get("rewarm_policy", _MISSING)
+        if policy is _MISSING or not isinstance(policy, str) or policy not in REWARM_POLICIES:
+            raise ConfigError(
+                f"枪型 {gun_type!r} 的 rewarm_policy 必须是 {list(REWARM_POLICIES)} 之一",
+                component="config",
+            )
+        # restart 枪型用不到延长参数，允许缺省为 0；extend 枪型必须显式给正。
+        if policy == "extend":
+            extend_s = _number(section, "rewarm_extend_s", minimum=0.1)
+            extend_max = _integer(section, "rewarm_extend_max", minimum=1)
+        else:
+            extend_s = _number_with_default(section, "rewarm_extend_s", 0.0, minimum=0.0)
+            extend_max = _integer_with_default(section, "rewarm_extend_max", 0, minimum=0)
+        return cls(
+            gun_type=gun_type.strip(),
+            rewarm_policy=policy,
+            rewarm_extend_s=extend_s,
+            rewarm_extend_max=extend_max,
+        )
+
+
+@dataclass(frozen=True)
+class GunPolicies:
+    """各枪型的回温处置策略表。"""
+
+    profiles: Mapping[str, GunProfile]
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "GunPolicies":
+        if not section:
+            raise ConfigError("至少要配置一种枪型策略", component="config")
+        profiles: dict[str, GunProfile] = {}
+        for gun_type, raw in section.items():
+            if not isinstance(raw, Mapping):
+                raise ConfigError(f"枪型 {gun_type!r} 的策略必须是映射", component="config")
+            profile = GunProfile.from_mapping(gun_type, raw)
+            profiles[profile.gun_type] = profile
+        return cls(profiles)
+
+    def get(self, gun_type: str) -> GunProfile:
+        """取某枪型策略；未配置即拒绝装配，不允许落到隐式默认。"""
+
+        profile = self.profiles.get(gun_type)
+        if profile is None:
+            raise ConfigError(f"枪型 {gun_type!r} 缺少回温策略配置", component="config")
+        return profile
+
+    def as_mapping(self) -> dict:
+        return {
+            gun_type: {
+                "rewarm_policy": profile.rewarm_policy,
+                "rewarm_extend_s": profile.rewarm_extend_s,
+                "rewarm_extend_max": profile.rewarm_extend_max,
+            }
+            for gun_type, profile in self.profiles.items()
+        }
 
 
 @dataclass(frozen=True)
@@ -220,14 +333,19 @@ class DispenserLimits:
     seat_timeout_s: float
     max_line_pressure_mpa: float
     isolate_lead_s: float
+    gun_type: str
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "DispenserLimits":
+        gun_type = section.get("gun_type")
+        if not isinstance(gun_type, str) or not gun_type.strip():
+            raise ConfigError("disp.gun_type 必须是非空字符串", component="config")
         limits = cls(
             nozzle_seat_travel_mm=_number(section, "nozzle_seat_travel_mm", minimum=1.0),
             seat_timeout_s=_number(section, "seat_timeout_s", minimum=1.0),
             max_line_pressure_mpa=_number(section, "max_line_pressure_mpa", minimum=1.0),
             isolate_lead_s=_number(section, "isolate_lead_s", minimum=0.0),
+            gun_type=gun_type.strip(),
         )
         if limits.isolate_lead_s >= limits.seat_timeout_s:
             raise ConfigError("隔离提前量必须小于落座超时", component="config")
@@ -287,6 +405,7 @@ class StationConfig:
     cool: CoolLimits
     flow: FlowLimits
     dispenser: DispenserLimits
+    guns: GunPolicies
     leak: LeakLimits
     queue: QueueLimits
 
@@ -301,6 +420,10 @@ class StationConfig:
             raise ConfigError("station.storage_root 必须是非空字符串", component="config")
 
         limits = _section(mapping, "limits")
+        dispenser = DispenserLimits.from_mapping(_section(limits, "disp"))
+        guns = GunPolicies.from_mapping(_section(limits, "guns"))
+        # 跨段校验：加注机所选枪型必须有对应的回温处置策略，否则拒绝装配。
+        guns.get(dispenser.gun_type)
         return cls(
             name=name,
             storage_root=storage_root,
@@ -310,7 +433,8 @@ class StationConfig:
             buffer=BufferLimits.from_mapping(_section(limits, "buffer")),
             cool=CoolLimits.from_mapping(_section(limits, "cool")),
             flow=FlowLimits.from_mapping(_section(limits, "flow")),
-            dispenser=DispenserLimits.from_mapping(_section(limits, "disp")),
+            dispenser=dispenser,
+            guns=guns,
             leak=LeakLimits.from_mapping(_section(limits, "leak")),
             queue=QueueLimits.from_mapping(_section(limits, "queue")),
         )
@@ -340,7 +464,13 @@ def default_config() -> StationConfig:
         buffer=BufferLimits(42.0, 1.5, 3600.0, 350.0),
         cool=CoolLimits(-40.0, 3.0, 0.6, 20.0),
         flow=FlowLimits(1.8, 0.15, 3.6, 0.4),
-        dispenser=DispenserLimits(55.0, 15.0, 44.0, 2.0),
+        dispenser=DispenserLimits(55.0, 15.0, 44.0, 2.0, "TK70"),
+        guns=GunPolicies(
+            {
+                "TK70": GunProfile("TK70", "restart", 0.0, 0),
+                "TK35": GunProfile("TK35", "extend", 10.0, 2),
+            }
+        ),
         leak=LeakLimits(4000.0, 5.0, 30.0),
         queue=QueueLimits(12, 45.0),
     )
@@ -382,6 +512,7 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "temp_band_c": cfg.cool.temp_band_c,
                 "cool_rate_c_per_s": cfg.cool.cool_rate_c_per_s,
                 "precool_hold_s": cfg.cool.precool_hold_s,
+                "stability_window_mode": cfg.cool.stability_window_mode,
             },
             "flow": {
                 "step_target_kg": cfg.flow.step_target_kg,
@@ -394,7 +525,9 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "seat_timeout_s": cfg.dispenser.seat_timeout_s,
                 "max_line_pressure_mpa": cfg.dispenser.max_line_pressure_mpa,
                 "isolate_lead_s": cfg.dispenser.isolate_lead_s,
+                "gun_type": cfg.dispenser.gun_type,
             },
+            "guns": cfg.guns.as_mapping(),
             "leak": {
                 "threshold_ppm": cfg.leak.threshold_ppm,
                 "sample_window_s": cfg.leak.sample_window_s,

@@ -33,7 +33,8 @@
       "target_temp_c": -40.0,
       "temp_band_c": 3.0,
       "cool_rate_c_per_s": 0.6,
-      "precool_hold_s": 20.0
+      "precool_hold_s": 20.0,
+      "stability_window_mode": "fixed_duration"
     },
     "flow": {
       "step_target_kg": 1.8,
@@ -45,7 +46,20 @@
       "nozzle_seat_travel_mm": 55.0,
       "seat_timeout_s": 15.0,
       "max_line_pressure_mpa": 44.0,
-      "isolate_lead_s": 2.0
+      "isolate_lead_s": 2.0,
+      "gun_type": "TK70"
+    },
+    "guns": {
+      "TK70": {
+        "rewarm_policy": "restart",
+        "rewarm_extend_s": 0.0,
+        "rewarm_extend_max": 0
+      },
+      "TK35": {
+        "rewarm_policy": "extend",
+        "rewarm_extend_s": 10.0,
+        "rewarm_extend_max": 2
+      }
     },
     "leak": {
       "threshold_ppm": 4000.0,

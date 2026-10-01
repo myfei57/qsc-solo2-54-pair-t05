@@ -89,7 +89,8 @@ class Platform:
         # 平台启动即以当前时刻建立一次压力基线，避免首轮操作被判过期。
         self.baseline.calibrate(self.clock.now(), self.config.buffer.target_pressure_mpa)
         self.temperature = TemperatureModel(self.config.cool)
-        self.precooler = Precooler(self.config.cool)
+        self.gun_profile = self.config.guns.get(self.config.dispenser.gun_type)
+        self.precooler = Precooler(self.config.cool, self.gun_profile)
         self.meter = MassFlowMeter(self.config.flow)
         self.flow_step = FlowStep(self.config.flow)
         self.nozzle = Nozzle(self.config.dispenser.nozzle_seat_travel_mm)
@@ -274,8 +275,16 @@ class Platform:
         rate_kg_per_min: float = 3.0,
         steps: int = 3,
         dt: float = 36.0,
+        rewarm_ticks: int = 0,
+        drop_ticks: int = 0,
+        disturb_after_s: float | None = None,
     ) -> dict:
-        """加注编排：队列确认 → 枪落座 → 预冷 → 加注 → 隔离停机 → 枪回位。"""
+        """加注编排：队列确认 → 枪落座 → 预冷 → 加注 → 隔离停机 → 枪回位。
+
+        ``rewarm_ticks`` / ``drop_ticks`` 在枪口温度进入目标带并稳温
+        ``disturb_after_s`` 秒（默认稳定窗口时长）之后注入回温、回读丢点，
+        供现场核对回温作废（或延长）与部分失败判定。
+        """
 
         with self._lock:
             op_id = self.ids.next()
@@ -299,6 +308,9 @@ class Platform:
                 steps=steps,
                 now=self.clock.now(),
                 dt=dt,
+                rewarm_ticks=rewarm_ticks,
+                drop_ticks=drop_ticks,
+                disturb_after_s=disturb_after_s,
             )
             if report["ok"]:
                 try:
@@ -404,10 +416,13 @@ class Platform:
         """汇总加注就绪判据，供控制台与巡检使用。"""
 
         fill_stage = self.topology.stage("fill")
+        verdict = self.precooler.verdict
         checks = {
             "running": self._running,
-            "precool_ready": self.precooler.is_ready(),
-            "temperature_in_band": self.temperature.reached(),
+            "precool_ready": verdict.ready,
+            "temperature_in_band": verdict.in_band,
+            "temperature_sample_ok": verdict.sample_ok,
+            "precool_not_failed": not self.precooler.is_failed(),
             "nozzle_latched": self.nozzle.is_latched(),
             "leak_latch_clear": not self.leak_latch.is_engaged(self.clock.now()),
             "confirm_idle": not self.confirm.pending(DEFAULT_VEHICLE),
@@ -578,15 +593,9 @@ class Platform:
         ).as_dict()
 
     def cool_snapshot(self) -> dict:
-        """返回预冷状态快照。"""
+        """返回预冷状态快照（字段即合格判定依据，与审计同源）。"""
 
-        return CoolSnapshot(
-            state=self.precooler.state,
-            temperature_c=self.temperature.value_c,
-            target_c=self.config.cool.target_temp_c,
-            held_s=self.precooler.held_s,
-            ready=self.precooler.is_ready() and self.temperature.reached(),
-        ).as_dict()
+        return CoolSnapshot.from_verdict(self.precooler.verdict).as_dict()
 
     def flow_snapshot(self) -> dict:
         """返回流量状态快照。"""
