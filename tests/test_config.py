@@ -8,6 +8,7 @@ import pytest
 
 from hydrorefuel.config import (
     CompressorLimits,
+    CoolLimits,
     FlowLimits,
     StationConfig,
     config_to_mapping,
@@ -17,6 +18,15 @@ from hydrorefuel.config import (
 from hydrorefuel.errors import ConfigError
 
 ROOT = Path(__file__).resolve().parents[1]
+
+_COOL_BASE = {
+    "target_temp_c": -40.0,
+    "temp_band_c": 3.0,
+    "cool_rate_c_per_s": 0.6,
+    "precool_hold_s": 20.0,
+    "rewarm_rate_c_per_s": 0.4,
+    "rewarm_extend_s": 10.0,
+}
 
 
 def test_repository_config_matches_defaults():
@@ -59,3 +69,24 @@ def test_invalid_limits_are_rejected():
 def test_missing_file_is_rejected():
     with pytest.raises(ConfigError):
         load_config(str(ROOT / "config" / "missing.json"))
+
+
+def test_cool_gun_policies_are_validated():
+    with pytest.raises(ConfigError):
+        CoolLimits.from_mapping(_COOL_BASE)
+    with pytest.raises(ConfigError):
+        CoolLimits.from_mapping({**_COOL_BASE, "gun_policies": {}})
+    with pytest.raises(ConfigError):
+        CoolLimits.from_mapping({**_COOL_BASE, "gun_policies": {"h70": "ignore"}})
+    limits = CoolLimits.from_mapping({**_COOL_BASE, "gun_policies": {"h35": "restart", "h70": "extend"}})
+    assert limits.policy_for("h35") == "restart"
+    assert limits.policy_for("h70") == "extend"
+    with pytest.raises(ConfigError):
+        limits.policy_for("h999")
+
+
+def test_dispenser_gun_type_must_have_a_policy():
+    raw = config_to_mapping(default_config())
+    raw["limits"]["disp"]["gun_type"] = "h999"
+    with pytest.raises(ConfigError):
+        StationConfig.from_mapping(raw)

@@ -12,10 +12,13 @@ from ..errors import InterlockError
 class Nozzle:
     """加注枪落座与闩锁。"""
 
-    def __init__(self, seat_travel_mm: float) -> None:
+    def __init__(self, seat_travel_mm: float, gun_type: str) -> None:
         if seat_travel_mm <= 0:
             raise ValueError("落座行程必须为正")
+        if not gun_type:
+            raise ValueError("枪型必须是非空字符串")
         self._seat_travel_mm = float(seat_travel_mm)
+        self._gun_type = gun_type
         self._travel_mm = 0.0
         self._seated = False
         self._latch_engaged = False
@@ -24,6 +27,12 @@ class Nozzle:
     @property
     def seat_travel_mm(self) -> float:
         return self._seat_travel_mm
+
+    @property
+    def gun_type(self) -> str:
+        """加注枪型（决定预冷回温超限的处置政策）。"""
+
+        return self._gun_type
 
     def seat(self, travel_mm: float) -> bool:
         """按枪位行程尝试落座，返回是否落座到位。"""

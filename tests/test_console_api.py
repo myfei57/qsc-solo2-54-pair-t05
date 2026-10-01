@@ -69,3 +69,26 @@ def test_console_unknown_path(platform):
             assert error.code == 404
     finally:
         server.stop()
+
+
+def test_console_cool_disturb_and_readiness(platform):
+    server = ConsoleServer(platform, port=0)
+    base = server.start()
+    try:
+        assert _post(f"{base}/api/unload", {"target_kg": 10.0})[1]["ok"] is True
+        assert _post(f"{base}/api/pressurize", {"charge_kg": 12.0})[1]["ok"] is True
+        assert _post(f"{base}/api/fill", {"steps": 1})[1]["ok"] is True
+        cool = _get(f"{base}/api/cool")[1]["cool"]
+        assert cool["ready"] is True
+        assert cool["gun_type"] == "h70"
+        assert cool["required_s"] == 20.0
+        disturb = _post(f"{base}/api/cool/disturb", {"rewarm_s": 20.0})[1]
+        assert "precool_revoked" in disturb["events"]
+        cool = _get(f"{base}/api/cool")[1]["cool"]
+        assert cool["ready"] is False
+        assert cool["revocations"] == 1
+        readiness = _get(f"{base}/api/readiness")[1]
+        assert readiness["checks"]["precool_ready"] is False
+        assert readiness["precool"]["state"] == "cooling"
+    finally:
+        server.stop()

@@ -66,6 +66,7 @@ class Api:
         add("POST", "/api/leak/reset", lambda params, body: self._platform.release_leak())
         add("POST", "/api/calibrate", self._calibrate)
         add("POST", "/api/disturb", self._disturb)
+        add("POST", "/api/cool/disturb", self._cool_disturb)
         add("POST", "/api/enqueue", self._enqueue)
         add("POST", "/api/dequeue", lambda params, body: self._platform.dequeue_vehicle())
         add("POST", "/api/concurrency", self._concurrency)
@@ -178,6 +179,12 @@ class Api:
 
     def _disturb(self, params: dict, body: dict) -> dict:
         return self._platform.disturb_buffer(_as_float(body, "delta_mpa", 0.0))
+
+    def _cool_disturb(self, params: dict, body: dict) -> dict:
+        return self._platform.disturb_cool(
+            rewarm_s=_as_float(body, "rewarm_s", 0.0),
+            drop_reads=int(body.get("drop_reads", 0)),
+        )
 
     def _enqueue(self, params: dict, body: dict) -> dict:
         return self._platform.enqueue_vehicle(str(body.get("vehicle", "vehicle01")))

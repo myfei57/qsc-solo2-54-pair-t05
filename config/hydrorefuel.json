@@ -33,7 +33,13 @@
       "target_temp_c": -40.0,
       "temp_band_c": 3.0,
       "cool_rate_c_per_s": 0.6,
-      "precool_hold_s": 20.0
+      "precool_hold_s": 20.0,
+      "rewarm_rate_c_per_s": 0.4,
+      "rewarm_extend_s": 10.0,
+      "gun_policies": {
+        "h35": "restart",
+        "h70": "extend"
+      }
     },
     "flow": {
       "step_target_kg": 1.8,
@@ -45,7 +51,8 @@
       "nozzle_seat_travel_mm": 55.0,
       "seat_timeout_s": 15.0,
       "max_line_pressure_mpa": 44.0,
-      "isolate_lead_s": 2.0
+      "isolate_lead_s": 2.0,
+      "gun_type": "h70"
     },
     "leak": {
       "threshold_ppm": 4000.0,

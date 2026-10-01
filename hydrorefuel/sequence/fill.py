@@ -1,7 +1,7 @@
 """加注顺序：队列确认 → 枪落座 → 预冷 → 开加注阀 → 阶梯流量核对 → 隔离停机。
 
-加注是连带的硬顺序：确认超时不许落座，枪没落座咬合不许开阀，预冷没保持够
-时长不许开阀，每一阶梯的累计质量必须落在公差内才允许推进下一阶梯；结束时
+加注是连带的硬顺序：确认超时不许落座，枪没落座咬合不许开阀，预冷未判
+合格不许开阀，每一阶梯的累计质量必须落在公差内才允许推进下一阶梯；结束时
 按"隔离 → 停机 → 枪回位"收尾。
 """
 
@@ -62,22 +62,29 @@ def fill_vehicle(
             return {"station": station, "vehicle": vehicle, "ok": False, "steps": log, "violations": violations}
 
         temperature.reset()
-        precooler.start()
+        precooler.reset()
+        precooler.start(nozzle.gun_type)
         ready = False
         for _ in range(max_steps):
             temperature.cool(dt)
-            ready = precooler.tick(dt, temperature.value_c)
+            ready = precooler.tick(dt, temperature.read())
+            for event in precooler.drain_events():
+                log.append(
+                    {
+                        "component": "cool",
+                        "action": event["action"],
+                        "severity": event["severity"],
+                        "detail": event["detail"],
+                    }
+                )
             if ready:
                 break
         log.append(
             {
                 "component": "cool",
                 "action": "precool",
-                "detail": {
-                    "temperature_c": round(temperature.value_c, 2),
-                    "held_s": round(precooler.held_s, 2),
-                    "ready": ready,
-                },
+                "severity": "notice" if ready else "warning",
+                "detail": {**precooler.verdict(), "temperature_c": round(temperature.value_c, 2)},
             }
         )
         if not ready:

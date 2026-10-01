@@ -20,6 +20,7 @@ from .clock import Clock, SystemClock
 from .comp.machine import Compressor
 from .comp.surge import SurgeGuard
 from .config import StationConfig, default_config
+from .cool.precool import IDLE as PRECOOL_IDLE
 from .cool.precool import Precooler
 from .cool.snapshot import CoolSnapshot
 from .cool.temperature import TemperatureModel
@@ -92,7 +93,7 @@ class Platform:
         self.precooler = Precooler(self.config.cool)
         self.meter = MassFlowMeter(self.config.flow)
         self.flow_step = FlowStep(self.config.flow)
-        self.nozzle = Nozzle(self.config.dispenser.nozzle_seat_travel_mm)
+        self.nozzle = Nozzle(self.config.dispenser.nozzle_seat_travel_mm, self.config.dispenser.gun_type)
         self.dispenser = Dispenser(self.config.dispenser, self.nozzle)
         self.setpoint = SetpointArbiter(
             self.config.buffer.target_pressure_mpa - self.config.buffer.pressure_tolerance_mpa,
@@ -165,7 +166,7 @@ class Platform:
                     step["action"],
                     station=station,
                     op_id=op_id,
-                    severity="notice",
+                    severity=step.get("severity", "notice"),
                     **detail,
                 )
             )
@@ -379,6 +380,49 @@ class Platform:
             "within_band": self.bank.within_band(),
         }
 
+    def disturb_cool(self, rewarm_s: float = 0.0, drop_reads: int = 0) -> dict:
+        """模拟枪口回温与回读丢点，判定当场响应并把结果写审计。
+
+        扰动施加后，只要预冷判定在运行就立即做一次观测判定：回温超限按
+        枪型政策处置，丢点作废当前窗口；产生的判定事件逐条发布到事件总线，
+        与加注编排写出的审计保持同一口径。
+        """
+
+        if rewarm_s < 0:
+            raise HydroError("回温时长不能为负", component="cool")
+        if drop_reads < 0:
+            raise HydroError("丢点次数不能为负", component="cool")
+        with self._lock:
+            before = self.temperature.value_c
+            if rewarm_s > 0:
+                self.temperature.rewarm(rewarm_s)
+            if drop_reads > 0:
+                self.temperature.drop_reads(drop_reads)
+            events: list[dict] = []
+            if self.precooler.state != PRECOOL_IDLE and (rewarm_s > 0 or drop_reads > 0):
+                reading = self.temperature.read()
+                self.precooler.tick(rewarm_s if rewarm_s > 0 else 1.0, reading)
+                events = self.precooler.drain_events()
+            for event in events:
+                self.bus.publish(
+                    Event.of(
+                        "cool",
+                        "cool",
+                        event["action"],
+                        station=self.unit,
+                        severity=event["severity"],
+                        **event["detail"],
+                    )
+                )
+            return {
+                "before_c": round(before, 2),
+                "after_c": round(self.temperature.value_c, 2),
+                "rewarm_s": rewarm_s,
+                "drop_reads": drop_reads,
+                "events": [event["action"] for event in events],
+                "verdict": self.precooler.verdict(),
+            }
+
     def enqueue_vehicle(self, vehicle: str) -> dict:
         """把车辆加入加注队列，返回排队位次。"""
 
@@ -416,6 +460,7 @@ class Platform:
         return {
             "ready": all(checks.values()),
             "checks": checks,
+            "precool": self.precooler.verdict(),
             "stage": {"name": fill_stage.name, "label": fill_stage.label, "requires": list(self.topology.predecessors("fill"))},
             "outstanding_confirms": self.confirm.outstanding(),
             "last_audit_ts": recent[-1]["ts"] if recent else None,
@@ -578,14 +623,22 @@ class Platform:
         ).as_dict()
 
     def cool_snapshot(self) -> dict:
-        """返回预冷状态快照。"""
+        """返回预冷状态快照（合格判定依据，与审计同源）。"""
 
+        verdict = self.precooler.verdict()
         return CoolSnapshot(
-            state=self.precooler.state,
+            state=verdict["state"],
             temperature_c=self.temperature.value_c,
-            target_c=self.config.cool.target_temp_c,
-            held_s=self.precooler.held_s,
-            ready=self.precooler.is_ready() and self.temperature.reached(),
+            target_c=verdict["target_c"],
+            held_s=verdict["held_s"],
+            required_s=verdict["required_s"],
+            remaining_s=verdict["remaining_s"],
+            ready=verdict["ready"] and self.temperature.reached(),
+            gun_type=verdict["gun_type"],
+            policy=verdict["policy"],
+            gaps=verdict["gaps"],
+            excursions=verdict["excursions"],
+            revocations=verdict["revocations"],
         ).as_dict()
 
     def flow_snapshot(self) -> dict:
